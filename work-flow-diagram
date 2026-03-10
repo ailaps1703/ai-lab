@@ -73,3 +73,211 @@
 │ - Manage Route53 origin domain              │
 │                                             │
 └─────────────────────────────────────────────┘
+
+
+
+
+
+Key DNS Endpoints
+Public Entry
+d1234abcd.cloudfront.net
+Users connect here.
+Customers can later map:
+app.customer-domain.com -> CloudFront
+Internal Origin
+<tenantSlug>-origin.openclaw-saas.io
+This is:
+only used by CloudFront
+never exposed publicly
+Security Layers (Defense in Depth)
+The architecture has 4 protection layers.
+Layer 1 — CloudFront + WAF
+Purpose:
+Is this traffic malicious?
+Protection:
+SQL injection
+bots
+IP reputation filtering
+rate limiting
+basic DDoS mitigation
+Layer 2 — Security Group
+Purpose:
+Is this request coming from CloudFront?
+Rule:
+Allow 443 only from
+CloudFront origin prefix list
+Meaning:
+Direct internet → EC2 is impossible
+Layer 3 — Nginx Header Verification
+CloudFront injects:
+X-Origin-Verify: <secret>
+Nginx checks:
+if ($http_x_origin_verify != secret) {
+  return 403;
+}
+This prevents:
+CloudFront bypass attacks
+Layer 4 — OpenClaw Gateway Token
+Gateway requires:
+Authorization Token
+This ensures:
+only authenticated users access OpenClaw APIs
+Deployment Workflow (End-to-End)
+Now let's walk through what happens when a new tenant is created.
+Step 1 — Customer Onboards
+Customer provides:
+AWS Account ID
+Cross-Account Role ARN
+Region
+Tenant Slug
+Example:
+tenantSlug = acme
+Step 2 — SaaS Control Plane Assumes Role
+SaaS backend uses:
+STS AssumeRole
+to access the customer AWS account.
+SaaS Account
+    │
+    ▼
+Customer Account
+This avoids storing credentials.
+Step 3 — Infrastructure Provisioning
+The SaaS platform automatically creates:
+In Customer Account
+VPC
+Security Group
+EC2 Instance
+IAM Role
+Secrets Manager entries
+Step 4 — EC2 Bootstrap
+When EC2 launches, the user-data script runs.
+It installs:
+Docker
+Docker Compose
+OpenClaw Gateway
+Nginx
+Certbot
+Directory layout:
+/opt/openclaw
+    docker-compose.yaml
+    nginx/
+    certbot/
+Step 5 — Containers Start
+Docker compose launches:
+openclaw-gateway
+nginx
+certbot
+Gateway runs:
+localhost:18789
+Nginx exposes:
+443
+Step 6 — TLS Certificate Issued
+Certbot performs:
+Let's Encrypt DNS-01
+Using SaaS Route53 zone.
+Certificate created for:
+acme-origin.openclaw-saas.io
+Step 7 — CloudFront Distribution Created
+CloudFront origin:
+acme-origin.openclaw-saas.io
+CloudFront injects header:
+X-Origin-Verify: <secret>
+Step 8 — WAF Attached
+WAF rules:
+AWS Managed Rules
+Bot protection
+Rate limiting
+Step 9 — Deployment Validation
+System verifies:
+EC2 containers healthy
+Gateway health check
+TLS valid
+CloudFront deployed
+WebSocket working
+Runtime Request Flow
+Now the actual runtime request path.
+1️⃣ User opens the app
+https://d1234abcd.cloudfront.net
+Browser sends request.
+2️⃣ CloudFront receives request
+CloudFront:
+checks WAF rules
+adds origin header
+Then forwards to origin.
+3️⃣ Request sent to Nginx
+Request includes:
+X-Origin-Verify: secret
+Nginx checks header.
+If invalid:
+403 Forbidden
+If valid:
+proxy to OpenClaw
+4️⃣ OpenClaw Gateway
+Gateway receives request:
+localhost:18789
+Then validates:
+gateway token
+If valid:
+process request
+5️⃣ Response returns
+OpenClaw
+  → Nginx
+  → CloudFront
+  → User browser
+Upgrade Workflow
+When SaaS upgrades OpenClaw:
+SaaS sends:
+SSM SendCommand
+to EC2.
+Commands executed:
+docker compose pull
+docker compose up -d
+Gateway updated without restarting Nginx.
+Result:
+zero-downtime upgrade
+Secret Rotation Workflow
+Gateway Token Rotation
+Generate new token
+Update Secrets Manager
+Restart gateway container
+Origin Header Rotation
+Add new header secret in Nginx
+Update CloudFront header
+Wait for deploy
+Remove old header
+Deprovisioning Workflow
+When tenant is deleted:
+sst remove --stage prod
+Deletes:
+EC2
+Security Groups
+WAF
+CloudFront
+Secrets
+Route53 record
+CloudFront deletion takes:
+~20 minutes
+Key Design Advantages
+1️⃣ Strong security
+4 layers:
+WAF
+SG
+Nginx
+Gateway
+2️⃣ SaaS control plane
+Central system manages:
+deployment
+updates
+secrets
+infra lifecycle
+3️⃣ Customer isolation
+Each tenant gets:
+dedicated EC2
+dedicated secrets
+dedicated origin
+4️⃣ Cost efficiency
+Only:
+1 EC2
+1 CloudFront
+1 WAF
+per tenant.
